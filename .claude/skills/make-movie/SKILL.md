@@ -92,6 +92,44 @@ code/submit_movie.sh NAME [--plot TYPE] [--select "..."] [--frame-args "..."] [o
      in FIELD between those percentiles of the galaxies passing the cuts, and
      picks the nearest galaxy to each. The result is deterministic. Output is
      sorted by FIELD (not mass), and `_selection.png` shows mass vs FIELD.
+   - **Grouped / coloured tracks** (e.g. "split by red or blue at z=0"):
+     - `--group-by FIELD:SNAP:EDGES` splits the galaxies into groups that are
+       drawn in different colours. It uses the same fields and SNAP as `--cut`;
+       an empty SNAP means `--select-snapshot`.
+     - k comma-separated edges give k+1 groups, and group i is
+       `edge[i-1] <= v < edge[i]`. Example: `g_r:127:0.6` gives blue (< 0.6)
+       and red (≥ 0.6) at z=0.
+     - Galaxies whose value is non-finite there are dropped.
+     - Jake defines red/blue as a fixed g−r cut per mass. Use his defaults
+       (Nov 2026) unless he gives one:
+       - 0.65 for log M* ≥ 10;
+       - 0.6 at 9.5;
+       - 0.5 at 9 and 8.5.
+       For other masses, ask him.
+     - `--group-names blue,red`: the legend labels. The default is built from
+       the edges, e.g. `g−r < 0.6`.
+     - `--group-colours tab:blue,tab:red`:
+       - 2 groups default to a dark blue/red pair; more groups use tab10.
+       - **Use named colours.** A bare `#rrggbb` inside `--select "..."`
+         becomes a bash comment in the job script.
+     - `--group-balance equal` (default): `--n` is split evenly between the
+       groups, and the usual picker runs inside each group.
+       - With `--group-by`, `--n-bins` defaults to 0, so this is a random
+         50/50 draw.
+       - Add `--spread-by F` to spread across each group's own 1–99% range
+         instead.
+     - `--group-balance none`: run the normal selection on everything, then
+       label each pick with its group. Example: spread across all of g−r,
+       coloured red/blue; the counts per group are whatever falls out.
+     - A group with too few candidates gives all it has, with a warning. It
+       isn't topped up from the other group.
+     - Output is group-major. In the frame script, `--n-tracks` and
+       `--track-stride` are applied **within each group**.
+     - Frames from a grouped npz automatically use a grey background (truncated
+       Greys), because red tracks vanish on YlOrRd. Override this with the frame
+       arg `--cmap NAME`.
+     - `--ids FILE` together with `--group-by` re-groups an existing set of
+       galaxies.
    - Look up the redshift of a snapshot in the master file's `/redshift`.
      Some reference points: 127 → z=0, 60 → z≈3.5.
    - `--seed 42`
@@ -116,8 +154,11 @@ code/submit_movie.sh NAME [--plot TYPE] [--select "..."] [--frame-args "..."] [o
        maximum, so you see the density build up.
      - `auto`: each frame is scaled to its own maximum. This matches the
        `*_auto` frames/movies in `animations/no_tracks/`.
-   - The trail colour, marker size and the 0.08 jitter on the quenched floor
-     are constants at the top of `make_movie_frame.py`.
+   - `--cmap NAME`: background colormap. The default `auto` gives YlOrRd, or
+     truncated Greys when the npz has groups.
+   - The trail colour (for ungrouped tracks), the grouped background map, the
+     marker size and the 0.08 jitter on the quenched floor are constants at
+     the top of `make_movie_frame.py`.
 5. **Other options:**
    - `--snaps FIRST-LAST`
    - `--array SPEC`: render only some frames (see "When a step fails")
@@ -152,6 +193,13 @@ that trails can only reach back as far as the first snapshot you included.
 - "Mass–metallicity movie, 25 tracks at 10^11 spread across the available
   metallicities" (Jake chose stellar Z and the 1–99% range):
   `code/submit_movie.sh mass_Zstar_1e11_Zspread --plot mass-Zstar --select "--mass-min 10.9 --mass-max 11.1 --n 25 --spread-by log_Z_star"`
+- "Mass–colour at 10^10.5, red vs blue at z=0, 50/50 random" (g−r cut 0.6):
+  `code/submit_movie.sh mass_colour_1e10.5_redblue_rand --plot mass-colour --select "--mass-min 10.4 --mass-max 10.6 --n 26 --group-by g_r:127:0.6 --group-names blue,red"`
+  - To spread evenly in g−r within each colour, still 50/50, add `--spread-by g_r`.
+  - To spread across the whole g−r range and just colour by red/blue, use
+    `--n 25 --spread-by g_r --group-by g_r:127:0.6 --group-names blue,red --group-balance none`.
+  - For a mass ladder, put the same flags on each spec line of
+    `submit_movie_set.sh`.
 - "Same tracks as before but longer tails on mass–SFR":
   `code/submit_movie.sh mass_SFR_even_tail30 --plot mass-SFR --tracks-npz data/NAME_OF_EARLIER_MOVIE/track_histories.npz --frame-args "--n-tracks 100 --track-stride 4 --tail 30"`
 - "Colour–magnitude, auto-scaled, no tracks":

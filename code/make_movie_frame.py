@@ -17,7 +17,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
-from matplotlib.colors import LogNorm
+from matplotlib.colors import LinearSegmentedColormap, LogNorm, to_rgba_array
+from matplotlib.lines import Line2D
 
 from SWIFT_tools import (
     load_SOAP_snapshot,
@@ -44,6 +45,13 @@ TRAIL_LW = 1.4
 HEAD_SIZE = 45
 ALPHA_MAX = 0.9
 ALPHA_MIN = 0.05
+
+# Background for grouped tracks (npz has 'group'): coloured groups, e.g. red
+# and blue, would be lost against YlOrRd. Greys cut so the densest bins are
+# mid-grey rather than black.
+GROUP_BG_CMAP = LinearSegmentedColormap.from_list(
+    'greys_trunc', plt.cm.Greys(np.linspace(0.08, 0.65, 256)))
+LEGEND_SHAPE_COLOUR = '#333333'   # central/satellite key when grouped
 
 # Quenched galaxies are all pinned to the same sSFR floor by the track
 # builder, so spread them slightly to stop them stacking into a fake line.
@@ -76,6 +84,9 @@ parser.add_argument('--min-run', type=int, default=2,
                          'before a track is drawn, to stop flickering')
 parser.add_argument('--out-dir', action='append', required=True,
                     help='output directory; repeat once per --tracks-file')
+parser.add_argument('--cmap', default='auto',
+                    help="background colormap; 'auto' = YlOrRd, or truncated "
+                         "Greys when the tracks file has groups")
 parser.add_argument('--norm', choices=['fixed', 'auto'], default='fixed',
                     help="'fixed': colour scale capped at the hard-coded z=0 "
                          "vmax, so density visibly builds up; 'auto': each "
@@ -220,15 +231,15 @@ def draw_tracks(ax, tracks_file):
     elif plot_syntax == 'mass-colour':
         if 'mag_g' not in tr.files:
             raise ValueError(
-                f"{tracks_file} has no mag_g/mag_r; it must come from the "
-                f"master-file route (select_tracks_for_movie.py --source master)")
+                f"{tracks_file} has no mag_g/mag_r; re-extract it with "
+                f"select_tracks_for_movie.py")
         with np.errstate(invalid='ignore'):
             y_track = (tr['mag_g'] - tr['mag_r']).astype(np.float64)
     else:  # mass-Zstar
         if 'stellar_metallicity' not in tr.files:
             raise ValueError(
-                f"{tracks_file} has no stellar_metallicity; it must come "
-                f"from the master-file route (select_tracks_for_movie.py --source master)")
+                f"{tracks_file} has no stellar_metallicity; re-extract it "
+                f"with select_tracks_for_movie.py")
         with np.errstate(divide='ignore', invalid='ignore'):
             y_track = np.log10(tr['stellar_metallicity'].astype(np.float64) / Z_SUN)
     present = tr['present']
@@ -237,13 +248,32 @@ def draw_tracks(ax, tracks_file):
     is_central = tr['is_central']
     n_tracks_all = log_mstar_t.shape[1]
 
-    # Optional subsetting
-    sel = np.arange(n_tracks_all)
-    if args.n_tracks is not None:
-        sel = sel[:args.n_tracks]
-    if args.track_stride > 1:
-        sel = sel[::args.track_stride]
+    # Groups (from select_tracks_for_movie.py --group-by); otherwise one
+    # unnamed group in TRAIL_COLOUR.
+    grouped = 'group' in tr.files
+    if grouped:
+        group = tr['group'].astype(int)
+        group_names = [str(n) for n in tr['group_names']]
+        group_colours = [str(c) for c in tr['group_colours']]
+    else:
+        group = np.zeros(n_tracks_all, int)
+        group_names = [None]
+        group_colours = [TRAIL_COLOUR]
+
+    # Optional subsetting, applied within each group so a stride or a
+    # first-N cut thins every group instead of dropping whole groups.
+    sel = []
+    for g in range(len(group_names)):
+        idx = np.flatnonzero(group == g)
+        if args.n_tracks is not None:
+            idx = idx[:args.n_tracks]
+        if args.track_stride > 1:
+            idx = idx[::args.track_stride]
+        sel.append(idx)
+    sel = np.concatenate(sel)
     print(f"Overlaying {len(sel)} of {n_tracks_all} tracks")
+    group = group[sel]
+    track_rgba = to_rgba_array(group_colours)[group]   # (n_sel, 4)
 
     log_mstar_t = log_mstar_t[:, sel]
     y_track = y_track[:, sel].copy()
@@ -282,7 +312,7 @@ def draw_tracks(ax, tracks_file):
     # --- trails ---
     start = max(0, row - args.tail)
     seg_list = []
-    seg_alpha = []
+    seg_rgba = []
     n_steps = row - start
     for k in range(n_steps):
         j = start + k
@@ -300,16 +330,13 @@ def draw_tracks(ax, tracks_file):
             axis=1,
         )
         seg_list.append(segs)
-        seg_alpha.append(np.full(segs.shape[0], alpha))
+        rgba = track_rgba[good].copy()
+        rgba[:, 3] = alpha
+        seg_rgba.append(rgba)
 
     if seg_list:
         segs = np.concatenate(seg_list, axis=0)
-        alphas = np.concatenate(seg_alpha)
-        rgba = np.tile(
-            np.array(plt.matplotlib.colors.to_rgba(TRAIL_COLOUR)),
-            (len(alphas), 1),
-        )
-        rgba[:, 3] = alphas
+        rgba = np.concatenate(seg_rgba, axis=0)
         ax.add_collection(
             LineCollection(segs, colors=rgba, linewidths=TRAIL_LW,
                            capstyle='round', zorder=3)
@@ -320,30 +347,60 @@ def draw_tracks(ax, tracks_file):
     cen = head & is_central[row]
     sat = head & ~is_central[row]
 
-    ax.scatter(xs[row][cen], ys[row][cen],
-               s=HEAD_SIZE, facecolors=HEAD_COLOUR, edgecolors='white',
-               linewidths=0.8, zorder=5, label='Central')
-    ax.scatter(xs[row][sat], ys[row][sat],
-               s=HEAD_SIZE, facecolors='none', edgecolors=HEAD_COLOUR,
-               linewidths=1.4, zorder=5, label='Satellite')
+    for g, colour in enumerate(group_colours):
+        head_colour = HEAD_COLOUR if not grouped else colour
+        in_g = group == g
+        ax.scatter(xs[row][cen & in_g], ys[row][cen & in_g],
+                   s=HEAD_SIZE, facecolors=head_colour, edgecolors='white',
+                   linewidths=0.8, zorder=5, label=None if grouped else 'Central')
+        ax.scatter(xs[row][sat & in_g], ys[row][sat & in_g],
+                   s=HEAD_SIZE, facecolors='none', edgecolors=head_colour,
+                   linewidths=1.4, zorder=5, label=None if grouped else 'Satellite')
 
-    ax.legend(loc=legend_loc, fontsize=13, framealpha=0.8,
-              markerscale=1.2).set_zorder(6)
+    if grouped:
+        # Colour = group, shape = central/satellite
+        ms = np.sqrt(HEAD_SIZE) * 1.2
+        handles = [Line2D([], [], ls='none', marker='o', ms=ms, mfc=c, mec='white',
+                          label=n) for n, c in zip(group_names, group_colours)]
+        handles += [
+            Line2D([], [], ls='none', marker='o', ms=ms, mfc=LEGEND_SHAPE_COLOUR,
+                   mec='white', label='Central'),
+            Line2D([], [], ls='none', marker='o', ms=ms, mfc='none',
+                   mec=LEGEND_SHAPE_COLOUR, mew=1.4, label='Satellite'),
+        ]
+        ax.legend(handles=handles, loc=legend_loc, fontsize=13,
+                  framealpha=0.8).set_zorder(6)
+    else:
+        ax.legend(loc=legend_loc, fontsize=13, framealpha=0.8,
+                  markerscale=1.2).set_zorder(6)
 
     print(f"heads drawn: {cen.sum()} central, {sat.sum()} satellite")
+    if grouped:
+        print("heads per group: " + ", ".join(
+            f"{n} {(head & (group == g)).sum()}" for g, n in enumerate(group_names)))
     tr.close()
 
 
 # ----------------------------------------------------------------------
 # One frame per (tracks file, out dir) pair; the snapshot is loaded once
 # ----------------------------------------------------------------------
+def background_cmap(tracks_file):
+    if args.cmap != 'auto':
+        return args.cmap
+    if tracks_file is not None:
+        with np.load(tracks_file) as tr:
+            if 'group' in tr.files:
+                return GROUP_BG_CMAP
+    return 'YlOrRd'
+
+
 for tracks_file, out_dir in zip(tracks_files, out_dirs):
     fig, ax = plt.subplots(figsize=(10, 8), dpi=300)
     ax.hist2d(
         x, y,
         bins=250,
         range=plot_range,
-        cmap='YlOrRd',
+        cmap=background_cmap(tracks_file),
         norm=LogNorm(vmin=1, vmax=vmax if args.norm == 'fixed' else None),
     )
     if tracks_file is not None:
