@@ -1,0 +1,7 @@
+data/
+frames/
+animations/
+logs/
+__pycache__/
+.ipynb_checkpoints/
+.claude/settings.local.json
